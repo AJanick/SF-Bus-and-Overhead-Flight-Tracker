@@ -1,12 +1,13 @@
 # This file is where you keep secret settings, passwords, and tokens!
 # If you put them in the code you risk committing that info or sharing it
-CIRCUITPY_WIFI_SSID = "baebees"
-CIRCUITPY_WIFI_PASSWORD = "KalStingArch1180!"
-API_KEY_511="0ae7f55c-7cd2-429b-828d-13e152d2a11c"
+CIRCUITPY_WIFI_SSID = "WIFI_NAME"
+CIRCUITPY_WIFI_PASSWORD = "WIFI_PASSWORD"
+API_KEY_511="511 API KEY"
 
 # area to search for flights: top latitude, bottom latitude, left longitude, right longitude
 # (so this example is central London)
 bounds_box = "37.97,37.87,-122.15,-122.0"
 
 # "True" or "False" to enable or disable status LED
+
 status_leds = "False"
