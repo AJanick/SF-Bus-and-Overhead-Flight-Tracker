@@ -53,7 +53,9 @@ ChatGPT needed to be told that each program did not need to run while the other 
 Finally there are two other projects that exist using different APIs and which have different features. They are not used in this project but will be a helpful reference if the Flight Radar 24 JSON file used goes away (as they have switched to a paid api). I would also like to incorporate airline logos if I am able to resolve my memory issues
 
 https://github.com/AxisNimble/TheFlightWall_OSS?tab=readme-ov-file (they have a commercial version of this available to purchase)
+
 https://github.com/ColinWaddell/FlightTracker/blob/master/README.md
+
 https://learn.adafruit.com/matrixportal-s3-flight-proximity-tracker/overview
 
 
