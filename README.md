@@ -69,6 +69,8 @@ Most work was done setting up the API and getting the upcoming times to decremen
 
 Please note that 511 api limits you to 60 api calls per hour. The current state of the program uses 4 api calls each time it runs so I have it refresh every 4 minutes. If you add or remove stops please adjust accordingly
 
+I am waiting for feedback on how to format the display from Jen as there are improvements to be made! If this isn't updated it means she hated it and I didn't develop further.
+
 
 # 4. Final Notes
 
