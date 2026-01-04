@@ -37,7 +37,7 @@ This project uses the flight tracking and hardware of smartbutnot's ["flightport
 
 It runs on circuit python v9 using the fork by compilebymile [here](https://github.com/compileByTheMile/flightportal)
 
-I used the same libraries shown in compilebymile's fork. However I did have to add one additional one to get the code to work. Not sure if that was my mistake or not.
+I used the same libraries shown in compilebymile's fork. However I did have to add one additional library to get the code to work. Not sure if that was my mistake or not.
 
 ChatGPT was used to make two changes to the code
 
