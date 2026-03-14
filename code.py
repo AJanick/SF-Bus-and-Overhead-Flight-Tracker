@@ -4,18 +4,18 @@
 # - UP: Bus mode (Program 1)
 # - DOWN: Flight mode (Program 2)
 #
-# Changes:
-# - Bus row colors: top blue, middle light blue, bottom orange
-# - Flight:
+# Bus:
+# - ONLY Route 1X inbound, one line, NO SCROLL
+#
+# Flight:
 #   * Speed (mph number only) shown on TOP ROW in light green, right-aligned
 #   * Speed hidden while TOP ROW scrolls
 #   * Altitude (number only, no "ft") shown on BOTTOM ROW in light green, right-aligned
-#   * Altitude hidden while BOTTOM ROW scrolls  <-- requested
-#   * Rest of the top/bottom row text keeps its original color
+#   * Altitude hidden while BOTTOM ROW scrolls
 # ============================================================
 
-import os
 import time
+import os
 import gc
 import json
 
@@ -31,7 +31,7 @@ from digitalio import DigitalInOut, Direction, Pull
 import neopixel
 
 from microcontroller import watchdog as w
-from watchdog import WatchDogMode
+from watchdog import WatchDogMode, WatchDogTimeout
 
 from adafruit_esp32spi import adafruit_esp32spi
 import adafruit_connection_manager
@@ -120,20 +120,21 @@ radio = adafruit_esp32spi.ESP_SPIcontrol(spi, esp32_cs, esp32_ready, esp32_reset
 # -----------------------------
 status_light = neopixel.NeoPixel(board.NEOPIXEL, 1, brightness=0.2)
 
+LED_COLORS = {
+    'red': (255, 0, 0),
+    'green': (0, 255, 0),
+    'blue': (0, 0, 255),
+    'yellow': (255, 255, 0),
+    'purple': (255, 0, 255),
+    'white': (255, 255, 255),
+    'off': (0, 0, 0)
+}
+
 def set_led_color(status_light, color_name):
     if not USE_LEDS or status_light is None:
         color_name = "off"
-    colors = {
-        'red': (255, 0, 0),
-        'green': (0, 255, 0),
-        'blue': (0, 0, 255),
-        'yellow': (255, 255, 0),
-        'purple': (255, 0, 255),
-        'white': (255, 255, 255),
-        'off': (0, 0, 0)
-    }
-    if color_name.lower() in colors:
-        status_light[0] = colors[color_name.lower()]
+    if color_name.lower() in LED_COLORS:
+        status_light[0] = LED_COLORS[color_name.lower()]
         status_light.show()
         return True
     return False
@@ -155,11 +156,9 @@ def rebuild_requests():
 # Shared reusable buffers (avoid allocations)
 # ============================================================
 
-BUS_JSON_SIZE = 8192  # bump to 12288 if you ever exceed this
-_bus_json = bytearray(BUS_JSON_SIZE)
-
 json_size = 14336
 json_bytes = None  # allocated only while flight mode runs
+json_bytes_len = 0
 
 # ============================================================
 # Program 2 (Flight)
@@ -187,7 +186,8 @@ FLIGHT_LONG_DETAILS_HEAD = "https://data-live.flightradar24.com/clickhandler/?fl
 rheaders = {
      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/106.0",
      "cache-control": "no-store, no-cache, must-revalidate, post-check=0, pre-check=0",
-     "accept": "application/json"
+     "accept": "application/json",
+     "Connection": "close"
 }
 
 def should_exit_flight():
@@ -314,7 +314,7 @@ def display_flight():
     label2.x = 1
     time.sleep(PAUSE_BETWEEN_LABEL_SCROLLING)
 
-    # Bottom row scroll: HIDE altitude during scroll (requested)
+    # Bottom row scroll: HIDE altitude during scroll
     label3_alt.text = ""
     _right_align_label(label3_alt)
 
@@ -348,20 +348,22 @@ def clear_json_bytes():
         mv[i:i+256] = chunk
 
 def get_flight_details(fn):
-    global json_bytes, json_size
+    global json_bytes, json_size, json_bytes_len
     byte_counter = 0
     chunk_length = 1024
 
     clear_json_bytes()
 
+    response = None
     try:
-        response = requests.get(url=FLIGHT_LONG_DETAILS_HEAD + fn, headers=rheaders)
+        gc.collect()
+        response = requests.get(url=FLIGHT_LONG_DETAILS_HEAD + fn, headers=rheaders, timeout=12)
         for chunk in response.iter_content(chunk_size=chunk_length):
+            w.feed()
             if (byte_counter + len(chunk) <= json_size):
                 json_bytes[byte_counter:byte_counter + len(chunk)] = chunk  # type: ignore
             else:
                 print("Exceeded max string size while parsing JSON")
-                response.close()
                 return False
 
             trail_start = json_bytes.find((b"\"trail\":"))  # type: ignore
@@ -373,17 +375,18 @@ def get_flight_details(fn):
                     trail_end += trail_start
                     closing_bytes = b'}]}'
                     json_bytes[trail_end:trail_end + len(closing_bytes)] = closing_bytes  # type: ignore
-                    for i in range(trail_end + 3, json_size):
-                        json_bytes[i] = 0  # type: ignore
+                    json_bytes_len = trail_end + 3
                     print("Details lookup saved " + str(trail_end) + " bytes.")
-                    response.close()
                     return True
 
-        response.close()
-    except (RuntimeError, OSError) as e:
+    except (RuntimeError, OSError, WatchDogTimeout) as e:
+        w.feed()
         print("Error--------------------------------------------------")
         print(e)
         return False
+    finally:
+        if response is not None:
+            response.close()
 
     print("Failed to find a valid trail entry in JSON")
     return False
@@ -396,9 +399,11 @@ def parse_details_json():
         if json_bytes is None:
             return False
 
-        long_json = json.loads(json_bytes)
+        # Parse using memoryview to avoid copying the buffer
+        long_json = json.loads(memoryview(json_bytes)[:json_bytes_len])
 
-        flight_number = long_json["identification"]["number"]["default"]
+        number_info = long_json["identification"]["number"]
+        flight_number = number_info["default"] if number_info else None
         flight_callsign = long_json["identification"]["callsign"]
         aircraft_code = long_json["aircraft"]["model"]["code"]
         aircraft_model = long_json["aircraft"]["model"]["text"]
@@ -411,6 +416,9 @@ def parse_details_json():
         altitude = long_json["trail"][0]["alt"]
         speed_knots = long_json["trail"][0]["spd"]
         speed_mph = int(speed_knots * 115078 // 100000)  # mph integer, no float allocs
+
+        # Free the parsed dict immediately after extracting fields
+        long_json = None
 
         if flight_number:
             print("Flight is called " + flight_number)
@@ -438,26 +446,33 @@ def parse_details_json():
 
 def checkConnection():
     print("Connecting to AP...")
+    attempts = 0
     while not radio.is_connected:
         try:
             w.feed()
             radio.connect_AP(ssid, password)
         except (RuntimeError, ConnectionError) as e:
-            print("could not connect to AP, retrying: ", e)
-            continue
+            attempts += 1
+            print("could not connect to AP, retrying:", e)
+            if attempts % 3 == 0:
+                radio.reset()
+                time.sleep(2)
+            else:
+                time.sleep(1)
+            w.feed()
     print("Connected")
     set_led_color(status_light, 'green')
 
 def get_flights():
-    with requests.get(url=FLIGHT_SEARCH_URL, headers=rheaders) as response:
+    gc.collect()
+    with requests.get(url=FLIGHT_SEARCH_URL, headers=rheaders, timeout=12) as response:
         data = response.json()
         if len(data) == 3:
             for flight_id, flight_info in data.items():
                 if not (flight_id == "version" or flight_id == "full_count"):
                     if len(flight_info) > 13:
                         return flight_id
-        else:
-            return False
+        return False
 
 def run_flight_mode():
     global json_bytes
@@ -475,7 +490,7 @@ def run_flight_mode():
 
     last_flight = ''
     while True:
-        if should_exit_flight():
+        if should_exit_flight() or should_auto_bus():
             return
 
         if not radio.is_connected:
@@ -489,6 +504,7 @@ def run_flight_mode():
         try:
             flight_id = get_flights()
         except Exception as e:
+            w.feed()
             print("Flight search error:", e)
             rebuild_requests()
             flight_id = False
@@ -512,51 +528,55 @@ def run_flight_mode():
                             return
                         if not display_flight():
                             return
+                        last_flight = flight_id
                     else:
                         print("error parsing JSON, skip displaying this flight")
                 else:
                     w.feed()
                     print("error loading details, skip displaying this flight")
-                last_flight = flight_id
         else:
             clear_flight()
 
         time.sleep(5)
         for i in range(0, QUERY_DELAY, +5):
-            if should_exit_flight():
+            if should_exit_flight() or should_auto_bus():
                 return
             time.sleep(5)
             w.feed()
         gc.collect()
 
 # ============================================================
-# Program 1 (Bus)
+# Program 1 (Bus) - ONLY Route 1X inbound, NO SCROLL
 # ============================================================
 
-STOP_1_OUT = "13845"
-STOP_1_IN = "13846"
-STOP_33_IN = "13643"
-STOP_33_OUT = "13644"
-
+STOP_1X_IN = "13876"  # inbound stop for 1X
 MAX_STOP_VISITS = 10
 HEADERS_511 = {"Accept-Encoding": "identity", "Connection": "close", "Accept": "application/json"}
-BUS_REFRESH_SECONDS = 240  # 4 calls/refresh => 60/hour max
+BUS_REFRESH_SECONDS = 120
 
-SCROLL_SPEED = 0.03
-PAUSE_BETWEEN_SCROLLS = 0.8
 LEFT_MARGIN = 0
-
-BUS_TOP_BLUE = 0x0000FF
 BUS_MID_LIGHTBLUE = 0x66CCFF
-BUS_BOTTOM_ORANGE = 0xFFA500
+
+bus_group = displayio.Group()
+bus_title = label.Label(FONT, text="JEN BUS ALERT", color=0xFF6600, x=LEFT_MARGIN, y=5)
+row1x    = label.Label(FONT, text="1X:--,--,--",   color=BUS_MID_LIGHTBLUE, x=LEFT_MARGIN, y=16)
+bus_time_lbl = label.Label(FONT, text="--:--",     color=0xFFFFFF, x=LEFT_MARGIN, y=26)
+bus_group.append(bus_title)
+bus_group.append(row1x)
+bus_group.append(bus_time_lbl)
 
 def _is_leap(y):
     return (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0)
 
+_year_days_cache = {}
+
 def _days_before_year(y):
+    if y in _year_days_cache:
+        return _year_days_cache[y]
     d = 0
     for yy in range(1970, y):
         d += 366 if _is_leap(yy) else 365
+    _year_days_cache[y] = d
     return d
 
 def _days_before_month(y, m):
@@ -590,38 +610,95 @@ def norm_route(s):
         return str(int(r))
     return r
 
-def fetch_stop_511(stop_code):
-    url = (
-        "http://api.511.org/transit/StopMonitoring"
-        + "?api_key=" + API_KEY_511
+def get_pacific_hm_wday(epoch):
+    """Return (hour, minute, weekday) in Pacific time. weekday: 0=Mon, 6=Sun."""
+    # Find year
+    days_total = epoch // 86400
+    year = 1970 + days_total // 365
+    while _days_before_year(year + 1) <= days_total:
+        year += 1
+    while _days_before_year(year) > days_total:
+        year -= 1
+    # Find month (1-indexed)
+    day_of_year = days_total - _days_before_year(year)
+    mdays = [31, 28 + (1 if _is_leap(year) else 0), 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    month = 0
+    while month < 11 and day_of_year >= mdays[month]:
+        day_of_year -= mdays[month]
+        month += 1
+    month += 1
+    # UTC-7 (PDT) March-October, UTC-8 (PST) November-February
+    local_epoch = epoch + (-7 * 3600 if 3 <= month <= 10 else -8 * 3600)
+    hh = (local_epoch % 86400) // 3600
+    mm = (local_epoch % 3600) // 60
+    wday = (local_epoch // 86400 + 3) % 7  # 0=Mon, 4=Fri, 6=Sun
+    return int(hh), int(mm), int(wday)
+
+def fmt_pacific_time(epoch):
+    hh, mm, _ = get_pacific_hm_wday(epoch)
+    ampm = "AM" if hh < 12 else "PM"
+    h12 = hh % 12 or 12
+    return "{:d}:{:02d}{}".format(h12, mm, ampm)
+
+def fetch_stop_511_raw(stop_code):
+    """Fetch 511 API using raw sockets, bypassing adafruit_requests entirely."""
+    gc.collect()
+    path = (
+        "/transit/StopMonitoring?api_key=" + API_KEY_511
         + "&agency=" + AGENCY
         + "&stopCode=" + stop_code
-        + "&format=json"
-        + "&MaximumStopVisits=" + str(MAX_STOP_VISITS)
+        + "&format=json&MaximumStopVisits=" + str(MAX_STOP_VISITS)
     )
+    host = "api.511.org"
 
-    gc.collect()
+    from adafruit_esp32spi.adafruit_esp32spi_socketpool import SocketPool as _SP
+    _pool = _SP(radio)
+    sock = _pool.socket(_pool.AF_INET, _pool.SOCK_STREAM)
+    sock.settimeout(5)
 
-    r = None
-    try:
-        r = requests.get(url, headers=HEADERS_511, timeout=20)
+    w.feed()
+    addr = radio.get_host_by_name(host)
+    sock.connect((addr, 80))
+    w.feed()
 
-        idx = 0
-        for chunk in r.iter_content(chunk_size=512):
-            if not chunk:
-                continue
-            ln = len(chunk)
-            if idx + ln > BUS_JSON_SIZE:
-                raise MemoryError("511 response exceeded BUS_JSON_SIZE")
-            _bus_json[idx:idx + ln] = chunk
-            idx += ln
+    request = (
+        "GET " + path + " HTTP/1.0\r\n"
+        "Host: " + host + "\r\n"
+        "Connection: close\r\n"
+        "Accept: application/json\r\n"
+        "Accept-Encoding: identity\r\n"
+        "\r\n"
+    )
+    sock.send(request.encode())
+    w.feed()
 
-        start = 3 if idx >= 3 and _bus_json[0:3] == b"\xef\xbb\xbf" else 0
-        return json.loads(_bus_json[start:idx].decode("utf-8"))
+    # Read response in chunks
+    chunks = []
+    while True:
+        w.feed()
+        try:
+            buf = bytearray(1024)
+            n = sock.recv_into(buf)
+            if n == 0:
+                break
+            chunks.append(bytes(buf[:n]))
+        except OSError:
+            break
 
-    finally:
-        if r:
-            r.close()
+    sock.close()
+
+    # Join and split headers from body
+    raw = b"".join(chunks)
+    chunks = None
+    header_end = raw.find(b"\r\n\r\n")
+    if header_end == -1:
+        raise ValueError("No HTTP header end found")
+    body = raw[header_end + 4:]
+    raw = None
+    # Strip BOM if present
+    if body[:3] == b"\xef\xbb\xbf":
+        body = body[3:]
+    return json.loads(body)
 
 def extract_etas_seconds(data, route, n=3):
     sd = data["ServiceDelivery"]
@@ -666,99 +743,89 @@ def fmt3_from_etas(arr):
         out.append(str(v // 60) if v is not None else "--")
     return ",".join(out)
 
-def run_bus_mode():
+def run_bus_mode(auto=False):
     global json_bytes
 
+    print("BUS: enter auto=" + str(auto))
     # Free big flight buffer while bus runs
     json_bytes = None
     gc.collect()
+    w.feed()
+    # Reset ESP32 to clear all held socket slots from flight mode HTTPS connections
+    radio.reset()
+    w.feed()
+    checkConnection()
+    w.feed()
+    print("BUS: gc done")
 
-    bus_group = displayio.Group()
-    row1  = label.Label(FONT, text="1  I:--,--,--  O:--,--,--",  color=BUS_TOP_BLUE, x=LEFT_MARGIN, y=8)
-    row1x = label.Label(FONT, text="1X I:--,--,--  O:--,--,--", color=BUS_MID_LIGHTBLUE, x=LEFT_MARGIN, y=18)
-    row33 = label.Label(FONT, text="33 I:--,--,--  O:--,--,--", color=BUS_BOTTOM_ORANGE, x=LEFT_MARGIN, y=28)
-    bus_group.append(row1); bus_group.append(row1x); bus_group.append(row33)
+    row1x.text = "1X:--,--,--"
+    bus_time_lbl.text = "--:--"
+    bus_title.x = display.width  # start off-screen right, will scroll in
     display.root_group = bus_group
+    print("BUS: display set")
 
-    etas_1i  = [None, None, None]
-    etas_1o  = [None, None, None]
     etas_1xi = [None, None, None]
-    etas_1xo = [None, None, None]
-    etas_33i = [None, None, None]
-    etas_33o = [None, None, None]
+
+    # Time base: synced from 511 API ResponseTimestamp on each successful fetch
+    time_base = [None, time.monotonic()]  # [utc_epoch, monotonic_at_sync]
+
+    def current_time_str():
+        if time_base[0] is None:
+            return "--:--"
+        elapsed = int(time.monotonic() - time_base[1])
+        return fmt_pacific_time(time_base[0] + elapsed)
+
+    # Title scroll state
+    title_x = display.width
+    last_scroll_t = time.monotonic()
+
+    def advance_title():
+        nonlocal title_x, last_scroll_t
+        now = time.monotonic()
+        if now - last_scroll_t >= TEXT_SPEED:
+            last_scroll_t = now
+            title_x -= 1
+            if title_x < -bus_title.bounding_box[2]:
+                title_x = display.width
+            bus_title.x = title_x
 
     last_fetch = -999999
     last_tick = time.monotonic()
-    last_snapshot = None
+    last_eta_snap = None
+    last_time_str = None
 
-    def update_labels_if_needed():
-        nonlocal last_snapshot
-        snap = (
-            tuple((v // 60) if v is not None else None for v in etas_1i),
-            tuple((v // 60) if v is not None else None for v in etas_1o),
-            tuple((v // 60) if v is not None else None for v in etas_1xi),
-            tuple((v // 60) if v is not None else None for v in etas_1xo),
-            tuple((v // 60) if v is not None else None for v in etas_33i),
-            tuple((v // 60) if v is not None else None for v in etas_33o),
-        )
-        if snap == last_snapshot:
-            return
-        last_snapshot = snap
-        row1.text  = "1  I:"  + fmt3_from_etas(etas_1i)  + "  O:" + fmt3_from_etas(etas_1o)
-        row1x.text = "1X I:" + fmt3_from_etas(etas_1xi) + "  O:" + fmt3_from_etas(etas_1xo)
-        row33.text = "33 I:" + fmt3_from_etas(etas_33i) + "  O:" + fmt3_from_etas(etas_33o)
+    def update_labels():
+        nonlocal last_eta_snap, last_time_str, etas_1xi
+        snap = tuple((v // 60) if v is not None else None for v in etas_1xi)
+        if snap != last_eta_snap:
+            last_eta_snap = snap
+            row1x.text = "1X:" + fmt3_from_etas(etas_1xi)
+        t = current_time_str()
+        if t != last_time_str:
+            last_time_str = t
+            bus_time_lbl.text = t
 
     def tick_and_update():
-        nonlocal last_tick
+        nonlocal last_tick, etas_1xi
         now = time.monotonic()
         dt = int(now - last_tick)
         if dt:
             last_tick += dt
-            tick_etas(dt, (etas_1i, etas_1o, etas_1xi, etas_1xo, etas_33i, etas_33o))
-            update_labels_if_needed()
+            tick_etas(dt, (etas_1xi,))
+            update_labels()
 
-    def scroll_label(lbl):
-        if down_pressed():
-            return False
-        w.feed()
-        tick_and_update()
-        wdisp = display.width
-        text_w = lbl.bounding_box[2]
-        if text_w <= wdisp:
-            lbl.x = LEFT_MARGIN
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < PAUSE_BETWEEN_SCROLLS:
-                w.feed()
-                if down_pressed():
-                    return False
-                tick_and_update()
-                time.sleep(0.02)
-            return True
-
-        lbl.x = wdisp
-        end_x = -text_w
-        for x in range(wdisp, end_x - 1, -1):
-            lbl.x = x
-            w.feed()
-            if down_pressed():
-                return False
-            tick_and_update()
-            time.sleep(SCROLL_SPEED)
-
-        lbl.x = LEFT_MARGIN
-        t0 = time.monotonic()
-        while time.monotonic() - t0 < PAUSE_BETWEEN_SCROLLS:
-            w.feed()
-            if down_pressed():
-                return False
-            tick_and_update()
-            time.sleep(0.02)
-        return True
+    auto_entered = auto
 
     while True:
         w.feed()
         if down_pressed():
             break
+        if auto_entered and not should_auto_bus():
+            print("BUS: auto-bus window ended, returning to flight")
+            break
+
+        tick_and_update()
+        advance_title()
 
         if time.monotonic() - last_fetch >= BUS_REFRESH_SECONDS:
             last_fetch = time.monotonic()
@@ -767,40 +834,151 @@ def run_bus_mode():
             if not radio.is_connected:
                 set_led_color(status_light, 'yellow')
                 checkConnection()
-                rebuild_requests()
+                w.feed()
 
-            d1i = fetch_stop_511(STOP_1_IN)
-            d1o = fetch_stop_511(STOP_1_OUT)
-            d33i = fetch_stop_511(STOP_33_IN)
-            d33o = fetch_stop_511(STOP_33_OUT)
+            w.feed()
+            try:
+                d_in = fetch_stop_511_raw(STOP_1X_IN)
+                try:
+                    resp_ts = d_in["ServiceDelivery"]["ResponseTimestamp"]
+                    time_base[0] = iso8601_to_epoch(resp_ts)
+                    time_base[1] = time.monotonic()
+                except Exception:
+                    pass
+                etas_1xi = extract_etas_seconds(d_in, "1X")
+            except (RuntimeError, OSError, MemoryError, KeyError, ValueError, TypeError, WatchDogTimeout) as e:
+                w.feed()
+                print("Bus fetch error:", e)
+                try:
+                    radio.reset()
+                    w.feed()
+                    checkConnection()
+                except Exception as e2:
+                    print("Bus recovery error:", e2)
+                w.feed()
 
-            etas_1i  = extract_etas_seconds(d1i,  "1")
-            etas_1o  = extract_etas_seconds(d1o,  "1")
-            etas_1xi = extract_etas_seconds(d1i,  "1X")
-            etas_1xo = extract_etas_seconds(d1o,  "1X")
-            etas_33i = extract_etas_seconds(d33i, "33")
-            etas_33o = extract_etas_seconds(d33o, "33")
+            last_eta_snap = None
+            last_time_str = None
+            update_labels()
 
-            last_snapshot = None
-            update_labels_if_needed()
-
-        if not scroll_label(row1):  break
-        if not scroll_label(row1x): break
-        if not scroll_label(row33): break
+        time.sleep(0.05)
 
 # ============================================================
 # MAIN: start in Flight mode at boot
 # ============================================================
 
+# Global time tracking: synced once at startup via 511 API, then tracked with monotonic()
+_time_sync = [None, 0.0]  # [utc_epoch, monotonic_at_sync]
+
+def sync_time_from_511():
+    """Quick 511 fetch — extract ResponseTimestamp without full JSON parse."""
+    try:
+        gc.collect()
+        path = (
+            "/transit/StopMonitoring?api_key=" + API_KEY_511
+            + "&agency=" + AGENCY
+            + "&stopCode=" + STOP_1X_IN
+            + "&format=json&MaximumStopVisits=1"
+        )
+        host = "api.511.org"
+        from adafruit_esp32spi.adafruit_esp32spi_socketpool import SocketPool as _SP
+        _pool = _SP(radio)
+        sock = _pool.socket(_pool.AF_INET, _pool.SOCK_STREAM)
+        sock.settimeout(5)
+        w.feed()
+        addr = radio.get_host_by_name(host)
+        sock.connect((addr, 80))
+        w.feed()
+        req = (
+            "GET " + path + " HTTP/1.0\r\n"
+            "Host: " + host + "\r\n"
+            "Connection: close\r\n"
+            "Accept-Encoding: identity\r\n"
+            "\r\n"
+        )
+        sock.send(req.encode())
+        w.feed()
+        # Read into fixed buffer to avoid fragmentation
+        raw = bytearray(2048)
+        raw_len = 0
+        while raw_len < 2048:
+            w.feed()
+            try:
+                mv = memoryview(raw)[raw_len:]
+                n = sock.recv_into(mv)
+                if n == 0:
+                    break
+                raw_len += n
+            except OSError:
+                break
+        sock.close()
+        # Find ResponseTimestamp in raw bytes
+        marker = b'"ResponseTimestamp":"'
+        idx = raw.find(marker, 0, raw_len)
+        if idx == -1:
+            print("TIME SYNC: no timestamp found")
+            return
+        start = idx + len(marker)
+        end = raw.index(b'"', start)
+        ts = raw[start:end].decode()
+        raw = None
+        _time_sync[0] = iso8601_to_epoch(ts)
+        _time_sync[1] = time.monotonic()
+        hh, mm, wday = get_pacific_hm_wday(_time_sync[0])
+        print("TIME SYNC: " + str(hh) + ":" + str(mm) + " wday=" + str(wday))
+        gc.collect()
+    except Exception as e:
+        print("TIME SYNC ERROR:", e)
+
+def current_utc_epoch():
+    if _time_sync[0] is None:
+        return None
+    return _time_sync[0] + int(time.monotonic() - _time_sync[1])
+
+def should_auto_bus():
+    """Return True if current Pacific time is in the auto-bus window."""
+    epoch = current_utc_epoch()
+    if epoch is None:
+        return False
+    hh, mm, wday = get_pacific_hm_wday(epoch)
+    is_weekday = wday <= 4  # Mon=0 .. Fri=4
+    mins = hh * 60 + mm
+    return is_weekday and (7 * 60 + 15) <= mins < (8 * 60 + 15)
+
 checkConnection()
 rebuild_requests()
+
+# Pre-allocate the large flight buffer BEFORE time sync to avoid fragmentation
+gc.collect()
+json_bytes = bytearray(json_size)
+
+sync_time_from_511()
 
 display.root_group = flight_group
 set_led_color(status_light, 'purple')
 
+# manual_flight: user pressed DOWN to exit bus mode during auto-bus window;
+# stay in flight mode until the window ends or they press UP.
+manual_flight = False
+
 while True:
-    w.feed()
-    if up_pressed():
-        run_bus_mode()
-    else:
-        run_flight_mode()
+    try:
+        w.feed()
+        if up_pressed():
+            manual_flight = False
+            run_bus_mode()
+        elif down_pressed():
+            manual_flight = True
+            run_flight_mode()
+        elif should_auto_bus() and not manual_flight:
+            run_bus_mode(auto=True)
+        else:
+            manual_flight = False  # outside auto window; reset override flag
+            run_flight_mode()
+    except WatchDogTimeout:
+        w.feed()
+        print("Watchdog timeout at top level")
+    except Exception as e:
+        w.feed()
+        print("Top level error:", e)
+
