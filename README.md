@@ -2,7 +2,7 @@
 
 64x32 display that shows either flights going overhead or the SF Muni schedule.
 
-Please be warned almost all of the code has been copied from other open-source projects or created by ChatGPT. ChatGPT also did all of the work integrating the code togeather. I have linked all referenced projects and I would recommend using the original source code whenever possible.
+Please be warned almost all of the code has been copied from other open-source projects or created by ChatGPT and Claude Code. ChatGPT/Claude Code also did all of the work integrating the code togeather. I have linked all referenced projects and I would recommend using the original source code whenever possible.
 
 This project has two programs that can be switched to using the buttons on the Matrix Portal M4
 
@@ -10,6 +10,7 @@ At Launch - Flight Tracker runs
 Hold "UP" button (middle button on Matrix Portal)  - Bus Tracker runs. What works best is holding the up button until the Bus Tracker appears
 Press "Down" Button (bottom button on Matrix Portal)- Flight tracker runs. Button does not need to be held
 Reset the device by unplugging and replugging the device or hitting the reset button (top button on Matrix Portal)
+Bus Tracker Automatically runs from 7:15am-8:15am on weekdays.
 
 A snake will when the device has restarted and the code is loading. 
 
@@ -39,7 +40,7 @@ It runs on circuit python v9 using the fork by compilebymile [here](https://gith
 
 I used the same libraries shown in compilebymile's fork. However I did have to add one additional library to get the code to work. Not sure if that was my mistake or not.
 
-ChatGPT was used to make two changes to the code
+ChatGPT/Claude Code was used to make two changes to the code
 
 1. ChatGPT needed to merge the flight tracker with the bus tracker and have them be switched using the matrix portal m4's buttons
 
@@ -61,18 +62,17 @@ https://learn.adafruit.com/matrixportal-s3-flight-proximity-tracker/overview
 
 # 3. Bus Tracker
 
-This code was written entirely by ChatGPT and it uses the 511 API. I'm sure there are many efficiencies that could be gained in this program but it is currently stable (or at least I hope)
+This code was written entirely by ChatGPT and mostly rewritten in Claude Code and it uses the 511 API. I'm sure there are many efficiencies that could be gained in this program but it is currently stable (or at least I hope)
 
 Users will need to make an account and request an api key [here](https://511.org/open-data/token).
 
-The only additional library I had to add was the adafruit_connection_manager.mpy
+The only additional library I had to add was the adafruit_connection_manager.mpy. I also added the asycio library but not sure if that is still in use in the code
 
 Most work was done setting up the API and getting the upcoming times to decrement. ChatGPT stuggled to get the api figured out and at one point said the API wasn't compatible with a matrix portal M4. Current version seems stable so I would just feed it into chatgpt as a starting point if needed.
 
-Please note that 511 api limits you to 60 api calls per hour. The current state of the program uses 4 api calls each time it runs so I have it refresh every 4 minutes. If you add or remove stops please adjust accordingly
+Please note that 511 api limits you to 60 api calls per hour. The current state of the program uses 1 api calls each time it runs and 1 api call att startup so I have it refresh every 2 minutes. If you add or remove stops or want inbound and outbound times shown please adjust accordingly
 
-I am waiting for feedback on how to format the display from Jen as there are improvements to be made! If this isn't updated it means she hated it and I didn't develop further.
-
+The tracker is currently set to show the inbound 1x at California and Laurel. It also shows the current time which is also pulled from the 511 API
 
 # 4. Final Notes
 
